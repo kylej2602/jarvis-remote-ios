@@ -35,7 +35,7 @@ settings:
     # should start. Link is a @MainActor class whose callbacks arrive on an
     # NWConnection queue, which under complete checking produces a wall of
     # sendability errors that have to be worked through one compile at a time -
-    # and every compile here is a five-minute round trip through a CI runner.
+    # and every compile here is a round trip through a CI runner.
     # `minimal` still diagnoses actual data races across actor boundaries.
     SWIFT_STRICT_CONCURRENCY: minimal
 
@@ -45,6 +45,10 @@ targets:
     platform: iOS
     sources:
       - path: Jarvis/Sources
+      # The asset catalogue only, not the whole Resources folder: Info.plist
+      # lives beside it and is referenced through INFOPLIST_FILE, so sweeping
+      # the directory in would also copy it into the bundle as a stray resource.
+      - path: Jarvis/Resources/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jarvis.remote
