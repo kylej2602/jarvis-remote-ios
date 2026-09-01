@@ -102,9 +102,15 @@ final class Link: ObservableObject {
     }
 
     private func open() {
-        guard wantOpen, let url = URL(string:
-            "ws://\(host):\(port)/ws?token=\(token.addingPercentEncoding(
-                withAllowedCharacters: .alphanumerics) ?? token)") else { return }
+        guard wantOpen else { return }
+        // Built on its own line, not inside the interpolation. Swift will not
+        // accept an expression that spans lines inside \( ), and the error it
+        // gives for one - "unterminated string literal" - points at the string
+        // rather than at the call that broke it.
+        let escaped = token.addingPercentEncoding(
+            withAllowedCharacters: .alphanumerics) ?? token
+        guard let url = URL(string:
+            "ws://\(host):\(port)/ws?token=\(escaped)") else { return }
 
         let ws = NWProtocolWebSocket.Options()
         ws.autoReplyPing = true                 // answer the server's keepalive
