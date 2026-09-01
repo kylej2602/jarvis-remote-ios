@@ -1,0 +1,22 @@
+# Nothing here is generated, and nothing here is secret.
+#
+# This repository holds the iPhone app only. The Jarvis PC side - the .env with
+# its keys, the logs, the cloned voice - is deliberately NOT in it and must
+# never be added to it.
+
+# XcodeGen output. project.yml is the project; the .xcodeproj is built from it
+# in about a second, conflicts on every change, and nobody can review one.
+*.xcodeproj/
+*.xcworkspace/
+
+# Build products
+build/
+DerivedData/
+*.ipa
+*.xcarchive/
+Payload/
+
+# Xcode noise
+xcuserdata/
+*.xcuserstate
+.DS_Store

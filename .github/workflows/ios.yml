@@ -1,0 +1,130 @@
+# Build the iPhone app and publish an .ipa Scarlet can install from a URL.
+#
+# WHY THIS FILE EXISTS. An .ipa can only be produced by Xcode, and Xcode only
+# runs on macOS. Kai builds on Windows. GitHub's macOS runners are the way out:
+# push, this runs, and an .ipa appears - both as a workflow artefact and, more
+# usefully, as a GitHub Release asset with a permanent direct link:
+#
+#     https://github.com/<owner>/<repo>/releases/latest/download/Jarvis.ipa
+#
+# That URL always points at the newest build. Paste it into Scarlet on the phone
+# ("+" -> from URL) and it downloads, signs with your certificate and installs -
+# no computer in the loop at all. It is the reason this publishes a Release
+# rather than stopping at an artefact: artefacts are zip files behind a login,
+# and Scarlet cannot install either of those things.
+#
+# THE .ipa IS UNSIGNED, DELIBERATELY. Signing here would mean uploading an Apple
+# developer certificate and its private key as repository secrets, and would tie
+# every build to whichever provisioning profile was current that day. Scarlet,
+# Sideloadly and AltStore all sign on the way onto the phone with the identity
+# already on the device, and re-sign when it rolls over. Leaving the signature
+# to them is both safer and less work.
+#
+# IF YOU HAVE A MAC none of this is needed:
+#     brew install xcodegen && cd ios && xcodegen && open Jarvis.xcodeproj
+
+name: iPhone app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+
+# The release step writes to the repository. Nothing else here needs any of it.
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show what Xcode we have
+        # Not pinned to a path. Runner images retire Xcode versions on their own
+        # schedule, and a hard-coded /Applications/Xcode_16.app turns into "file
+        # not found" on a day nobody changed anything. This prints what is
+        # actually there, which is the thing you want in the log when a build
+        # that worked last week stops compiling.
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build the archive
+        working-directory: ios
+        # CODE_SIGNING_ALLOWED=NO is the whole trick. xcodebuild otherwise
+        # refuses to archive for a device without a team and a profile; with it,
+        # the compiler and linker do their work and only the signing step is
+        # skipped, leaving a complete .app for something else to sign later.
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Jarvis.xcodeproj \
+            -scheme Jarvis \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Jarvis.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            archive
+
+      - name: Package as .ipa
+        # An .ipa is a zip with the .app inside a folder called Payload. That is
+        # the entire format. xcodebuild -exportArchive would do it too, but only
+        # with a signing team, which is the thing being avoided.
+        run: |
+          cd "$RUNNER_TEMP"
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R Jarvis.xcarchive/Products/Applications/Jarvis.app Payload/
+          zip -qry Jarvis.ipa Payload
+          ls -lh Jarvis.ipa
+
+      - name: Keep it as an artefact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-ipa
+          path: ${{ runner.temp }}/Jarvis.ipa
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          # A rolling tag, so /releases/latest/download/Jarvis.ipa keeps working
+          # and Scarlet never needs to be given a new address.
+          tag_name: build-${{ github.run_number }}
+          name: Jarvis ${{ github.run_number }}
+          files: ${{ runner.temp }}/Jarvis.ipa
+          fail_on_unmatched_files: true
+          body: |
+            Unsigned build ${{ github.run_number }} from `${{ github.sha }}`.
+
+            **Install on the phone with Scarlet:** open Scarlet, `+`, *from URL*,
+            and paste
+
+                https://github.com/${{ github.repository }}/releases/latest/download/Jarvis.ipa
+
+            That link always points at the newest build, so it does not change.
+
+            Then in Jarvis on the PC: set `JARVIS_REMOTE=1` in `.env`, restart
+            him, and say **"Jarvis, pair my phone"**.

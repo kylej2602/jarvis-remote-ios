@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Jarvis</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+
+    <!--
+      THE PERMISSION THIS APP LIVES OR DIES BY.
+
+      Since iOS 14, an app cannot open a connection to a private address - or
+      even discover that one exists - until the user has allowed it, and the
+      prompt shows this exact sentence. If it is missing the app is killed at
+      the first connection attempt, with a crash report that says nothing about
+      why. It is worded to explain the whole point rather than to satisfy the
+      requirement.
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Jarvis needs to reach your PC on this Wi-Fi network so it can show you the HUD, stream your screen and move your mouse and keyboard. Nothing leaves your network.</string>
+
+    <!--
+      Cleartext to the LAN, and to nothing else.
+
+      There is no certificate authority that will issue a certificate for
+      192.168.1.10, so https to a PC on a home network is not a thing that
+      exists. NSAllowsLocalNetworking is Apple's narrow exception for exactly
+      this case: it permits http:// and ws:// to link-local and private
+      addresses while leaving App Transport Security fully in force for
+      everything on the internet. NSAllowsArbitraryLoads - which is what most
+      people reach for - would switch ATS off for the whole app, and is both
+      unnecessary here and a reason to be rejected from the App Store.
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+
+    <key>UILaunchScreen</key>
+    <dict>
+        <key>UIColorName</key>
+        <string></string>
+    </dict>
+
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+    </dict>
+
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <key>UIUserInterfaceStyle</key>
+    <string>Dark</string>
+    <key>UIRequiresFullScreen</key>
+    <false/>
+    <key>UIStatusBarStyle</key>
+    <string>UIStatusBarStyleLightContent</string>
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+</dict>
+</plist>

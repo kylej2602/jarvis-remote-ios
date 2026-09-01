@@ -1,0 +1,10 @@
+# LF everywhere, checked in and checked out.
+#
+# This is built on Windows and compiled on a macOS runner. Git on Windows would
+# otherwise hand the runner a workflow whose `run:` blocks end in CRLF, and bash
+# reads the carriage return as part of the last argument - so the failure is a
+# command not found for something that is plainly right there in the log.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ipa binary

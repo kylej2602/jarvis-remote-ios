@@ -1,0 +1,65 @@
+# XcodeGen spec for the Jarvis remote.
+#
+# There is no .xcodeproj checked in, on purpose. A pbxproj is 900 lines of
+# generated XML with UUID cross-references, it conflicts on every change, and
+# nobody can review one. This file is the project; `xcodegen` turns it into an
+# Xcode project in about a second, and the CI workflow does exactly that before
+# it builds.
+#
+#   brew install xcodegen && cd ios && xcodegen && open Jarvis.xcodeproj
+#
+# iOS 17 is the floor because of `onChange(of:) { old, new in }` and
+# `MainActor.assumeIsolated`. Every iPhone that can run iOS 17 is an XR or
+# newer, which is every phone anyone is sideloading onto in 2026.
+
+name: Jarvis
+options:
+  bundleIdPrefix: com.jarvis
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Sideloading with a personal Apple ID means the signature is applied
+    # afterwards, by Sideloadly or AltStore, with whatever team the user has.
+    # The CI build produces an UNSIGNED archive; see .github/workflows/ios.yml.
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1,2"        # iPhone and iPad; the HUD suits a big screen
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # `complete` is where this should end up, and it is not where a first build
+    # should start. Link is a @MainActor class whose callbacks arrive on an
+    # NWConnection queue, which under complete checking produces a wall of
+    # sendability errors that have to be worked through one compile at a time -
+    # and every compile here is a five-minute round trip through a CI runner.
+    # `minimal` still diagnoses actual data races across actor boundaries.
+    SWIFT_STRICT_CONCURRENCY: minimal
+
+targets:
+  Jarvis:
+    type: application
+    platform: iOS
+    sources:
+      - path: Jarvis/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarvis.remote
+        PRODUCT_NAME: Jarvis
+        INFOPLIST_FILE: Jarvis/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SUPPORTS_MACCATALYST: NO
+        # The app talks to a PC on the LAN over plain HTTP and ws://. There is
+        # no certificate to be had for 192.168.1.x, and the traffic never
+        # leaves the house. NSAllowsLocalNetworking (in Info.plist) is the
+        # narrow, Apple-sanctioned exception for exactly this - it permits
+        # cleartext to local addresses ONLY, and to nothing else.
+        #
+        # No INFOPLIST_KEY_* settings here on purpose: those are only merged
+        # when Xcode GENERATES the Info.plist, and this target ships a real one
+        # (Resources/Info.plist). Listing them alongside an explicit
+        # INFOPLIST_FILE looks like it is doing something and is silently
+        # ignored, which is worse than not being there.
