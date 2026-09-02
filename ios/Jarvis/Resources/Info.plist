@@ -46,10 +46,54 @@
       people reach for - would switch ATS off for the whole app, and is both
       unnecessary here and a reason to be rejected from the App Store.
     -->
+    <!--
+      THE MICROPHONE, FOR TALKING INTO THE ROOM THE PC IS IN.
+
+      Only ever opened while the TALK button is being HELD - it is push to hold
+      rather than a toggle precisely so that this cannot be left running in a
+      pocket - and the session is deactivated the moment it is released, which
+      is what takes the orange recording dot away again.
+    -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Hold TALK and your voice comes out of your PC's speakers, so you can talk to whoever is in the room. The microphone is only on while you are holding the button.</string>
+
+    <!--
+      Cleartext to the LAN and to the tailnet, and to nothing else.
+
+      NSAllowsLocalNetworking is Apple's narrow exception for a PC on a home
+      network: there is no certificate authority that will issue a certificate
+      for 192.168.1.226, so https to one is not a thing that exists. It covers
+      RFC 1918 and link-local addresses and leaves App Transport Security fully
+      in force for everything on the internet.
+
+      What it does NOT cover is 100.64.0.0/10, which is where Tailscale puts
+      every node - that is carrier-grade NAT space, not private space, so as far
+      as ATS is concerned it is a public address being asked for over http. The
+      raw socket is unaffected (ATS is a URL-loading-system policy and the
+      connection is an NWConnection), but the HUD tab is a WKWebView and a web
+      view goes through ATS like anything else. So the tailnet gets a named
+      exception rather than a blanket one: ts.net is Tailscale's MagicDNS
+      domain, netreach.py reports this machine's name under it, and
+      reachable_addresses() puts that name AHEAD of the bare 100.x address for
+      this exact reason.
+
+      Deliberately not NSAllowsArbitraryLoads, which is what most people reach
+      for and which switches ATS off for the entire app.
+    -->
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
         <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>ts.net</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+        </dict>
     </dict>
 
     <key>UILaunchScreen</key>

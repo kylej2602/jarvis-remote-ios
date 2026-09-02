@@ -249,3 +249,36 @@ enum Vault {
         ] as CFDictionary)
     }
 }
+
+// MARK: - what the app remembers between launches
+//
+// Everything here is a hint, never a secret - the secret is in the Keychain
+// above. The most important of them is the ADDRESS LIST: it is what lets the
+// app reconnect after a walk out of the house without being told anything.
+// The PC reports every address it answers on (netreach.py) and the app keeps
+// the list, so the next launch tries the tailnet address and the home Wi-Fi
+// address in turn rather than only the one that worked last time.
+enum Defaults {
+    private static let d = UserDefaults.standard
+
+    static func saveAddresses(_ list: [String], port: UInt16) {
+        d.set(list, forKey: "addresses")
+        d.set(Int(port), forKey: "lastPort")
+    }
+
+    static var addresses: [String] {
+        (d.array(forKey: "addresses") as? [String]) ?? []
+    }
+
+    static var port: UInt16 {
+        let p = d.integer(forKey: "lastPort")
+        return p == 0 ? 8765 : UInt16(p)
+    }
+
+    /// The MAC to send a magic packet to, so "turn my PC on" survives the PC
+    /// being off - which is exactly when it cannot be asked for it.
+    static var wakeMac: String {
+        get { d.string(forKey: "wakeMac") ?? "" }
+        set { d.set(newValue, forKey: "wakeMac") }
+    }
+}

@@ -63,7 +63,12 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(pc.address, forKey: "lastHost")
         UserDefaults.standard.set(Int(pc.port), forKey: "lastPort")
         UserDefaults.standard.set(pc.name, forKey: "lastName")
-        link.connect(host: pc.address, port: pc.port, token: token)
+        // Every address this PC has ever reported goes along with the one that
+        // was picked, so a connection made at home still knows the tailnet
+        // address to fall back to the moment the phone leaves the house. See
+        // Link.candidates.
+        link.connect(host: pc.address, port: pc.port, token: token,
+                     alternates: Defaults.addresses)
         connectedOnce = true
     }
 
@@ -87,11 +92,21 @@ final class AppModel: ObservableObject {
         connectedOnce = false
     }
 
+    /// The real HUD, at whichever address the socket is CURRENTLY using.
+    ///
+    /// Not the address that was picked when the phone was paired. The link
+    /// fails over between the home address and the tailnet one on its own, and
+    /// a web view still pointed at 192.168.1.x while the socket is happily
+    /// connected over the tailnet is the one part of the app that would
+    /// silently stop working away from home. Falls back to the paired address
+    /// while the socket is down, so the tab has something to load on the way
+    /// back up.
     var hudURL: URL? {
         guard let pc else { return nil }
+        let host = link.activeAddress.isEmpty ? pc.address : link.activeAddress
         let t = token.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
             ?? token
-        return URL(string: "http://\(pc.address):\(pc.port)/hud?token=\(t)")
+        return URL(string: "http://\(host):\(pc.port)/hud?token=\(t)")
     }
 }
 
@@ -106,7 +121,12 @@ struct RootView: View {
             if model.connectedOnce {
                 TabView(selection: $tab) {
                     ControlTab().tabItem { Label("Control", systemImage: "rectangle.and.hand.point.up.left") }.tag(0)
-                    ScreenTab().tabItem { Label("Screen", systemImage: "display") }.tag(1)
+                    // REMOTE, not "Screen". The old tab was a picture of one
+                    // monitor with a frame-rate menu. This one is the whole of
+                    // being at the PC without being at it: every display, full
+                    // screen, the pointer, the room's audio both ways, and the
+                    // power. See RemoteView.swift.
+                    RemoteTab().tabItem { Label("Remote", systemImage: "display.and.arrow.down") }.tag(1)
                     HUDTab().tabItem { Label("HUD", systemImage: "circle.hexagongrid") }.tag(2)
                     TalkTab().tabItem { Label("Talk", systemImage: "waveform") }.tag(3)
                 }
@@ -274,108 +294,35 @@ struct Key: View {
 }
 
 // MARK: - screen
-
-struct ScreenTab: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var link: Link
-    @State private var live = false
-    @State private var monitor = 0
-    @State private var fps = 8.0
-
-    var body: some View {
-        VStack(spacing: 0) {
-            StatusBar()
-
-            GeometryReader { geo in
-                ZStack {
-                    Color.black
-                    if let data = link.frame, let img = UIImage(data: data) {
-                        Image(uiImage: img)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .onTapGesture(coordinateSpace: .local) { point in
-                                tap(point, in: geo.size, image: img.size)
-                            }
-                    } else {
-                        Text(live ? "waiting for a frame…" : "press LIVE")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(Palette.dim)
-                    }
-                }
-            }
-
-            HStack(spacing: 10) {
-                Picker("", selection: $monitor) {
-                    ForEach(link.displays) { d in
-                        Text(d.label).tag(d.index)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                Picker("", selection: $fps) {
-                    Text("4 fps").tag(4.0)
-                    Text("8 fps").tag(8.0)
-                    Text("15 fps").tag(15.0)
-                    Text("24 fps").tag(24.0)
-                }
-                .pickerStyle(.menu)
-
-                Key(live ? "STOP" : "LIVE", active: live) {
-                    live.toggle()
-                    push()
-                }
-                .frame(width: 96)
-            }
-            .padding(12)
-            .background(Palette.bg)
-        }
-        .background(Palette.bg.ignoresSafeArea())
-        .onChange(of: monitor) { _, _ in if live { push() } }
-        .onChange(of: fps) { _, _ in if live { push() } }
-        .onDisappear {
-            // Leaving the tab stops the stream. Encoding JPEGs of three
-            // monitors for a view nobody is looking at is a straight tax on the
-            // machine Jarvis is trying to keep responsive.
-            if live { live = false; push() }
-        }
-    }
-
-    private func push() {
-        link.command("screen", ["on": live, "monitor": monitor,
-                                      "fps": Int(fps), "width": 1280,
-                                      "quality": 55])
-    }
-
-    /// A tap on the picture is a click on the real pixel. The mapping goes
-    /// through the display geometry the PC sent, so it is correct on a
-    /// three-monitor desk where the union does not start at 0,0.
-    private func tap(_ point: CGPoint, in view: CGSize, image: CGSize) {
-        guard let d = link.displays.first(where: { $0.index == monitor })
-        else { return }
-        let scale = min(view.width / image.width, view.height / image.height)
-        let shown = CGSize(width: image.width * scale, height: image.height * scale)
-        let origin = CGPoint(x: (view.width - shown.width) / 2,
-                             y: (view.height - shown.height) / 2)
-        let fx = (point.x - origin.x) / shown.width
-        let fy = (point.y - origin.y) / shown.height
-        guard (0...1).contains(fx), (0...1).contains(fy) else { return }
-        link.moveAbsolute(x: d.x + Int(fx * CGFloat(d.w)),
-                                y: d.y + Int(fy * CGFloat(d.h)))
-        link.click(.left)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    }
-}
+//
+// ScreenTab lived here: one monitor, a frame-rate menu, tap to click. It is
+// gone, replaced by RemoteTab (RemoteView.swift), which does what it did and
+// the three things it did not - every display including all of them at once,
+// real full screen, the room's audio in both directions, and the power. There
+// is deliberately no compatibility shim: two views drawing the same stream
+// would be two places for the "stop the stream when nobody is watching" rule
+// to be got wrong.
 
 // MARK: - the real HUD
 
 struct HUDTab: View {
     @EnvironmentObject var model: AppModel
+    // Observed even though nothing here reads it directly: model.hudURL is
+    // built from link.activeAddress, and SwiftUI only redraws a view when
+    // something it OBSERVES changes. Without this the web view keeps whatever
+    // address it loaded with, so failing over from the home network to the
+    // tailnet would reconnect the socket and leave the HUD tab pointed at an
+    // address that no longer answers.
+    @EnvironmentObject var link: Link
 
     var body: some View {
         VStack(spacing: 0) {
             StatusBar()
             if let url = model.hudURL {
                 WebView(url: url)
+                    // Re-created when the address changes, so the page is
+                    // reloaded from the new one rather than left dead.
+                    .id(url.absoluteString)
             } else {
                 Spacer()
                 Text("not connected").foregroundStyle(Palette.dim)
