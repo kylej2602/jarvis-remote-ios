@@ -19,6 +19,24 @@
 //  on a home network and needs nothing but the Local Network permission - which
 //  the app has to ask for regardless, because it cannot connect without it.
 //
+//  AND THAT SWEEP IS NOT TRIED FIRST, BECAUSE IT ONLY EVER WORKS AT HOME.
+//
+//  A subnet sweep is a question about the network the phone happens to be on.
+//  On mobile data there is no subnet to sweep at all - subnetPrefix() returns
+//  nil for pdp_ip0 deliberately - and on somebody else's Wi-Fi the sweep finds
+//  their printer. So the first thing tried is the set of addresses that are
+//  true wherever the phone is: the PC's tailnet name, and every address it has
+//  previously reported. Those are asked in parallel with a longer timeout,
+//  before a single LAN address is touched.
+//
+//  The tailnet name is `jarvis`, and it is not a guess. The machine is named
+//  that on the tailnet on purpose (`tailscale set --hostname=jarvis`), so that
+//  MagicDNS gives it a name this app can know at build time without anything
+//  personal being written into a public repository - `jarvis` resolves to a
+//  100.x address only for devices signed into the same tailnet, and to nothing
+//  at all for anybody else. That single line is what makes a fresh install
+//  connect from a train, having never once been on the home Wi-Fi.
+//
 //  /api/hello is deliberately unauthenticated and deliberately says almost
 //  nothing: that a Jarvis is here, what the machine is called, and whether it
 //  has ever been paired with anything. Enough to put a name in a list, and
@@ -42,7 +60,21 @@ struct FoundPC: Identifiable, Hashable {
     let address: String
     let port: UInt16
     let paired: Bool
+    /// Every OTHER address this same PC answers on, straight from /api/hello.
+    /// Carried through pairing into Link.candidates, which is what makes the
+    /// connection survive a change of network without being told anything.
+    var alternates: [String] = []
     var id: String { "\(address):\(port)" }
+}
+
+/// What /api/hello says. A struct rather than a tuple because it grew a third
+/// member - the address list - and `if let (a, b, c) = ...` at three call sites
+/// is where a mix-up hides.
+struct Hello {
+    let name: String
+    let paired: Bool
+    /// Tailnet addresses first; netreach.py orders them that way on the PC.
+    let addresses: [String]
 }
 
 @MainActor
@@ -59,19 +91,48 @@ final class Discovery: ObservableObject {
         self.port = port
     }
 
+    /// Names that reach the PC from ANYWHERE, asked before the subnet sweep.
+    ///
+    /// `jarvis` is the machine's name on the tailnet, set on the PC with
+    /// `tailscale set --hostname=jarvis`. MagicDNS publishes it to every device
+    /// signed into the same tailnet and to nobody else, and Tailscale installs
+    /// the tailnet's suffix as a DNS search domain, so the bare short name
+    /// resolves on the phone whether it is on the home Wi-Fi, on a hotel
+    /// network or on 5G. Being a NAME rather than an address is the point:
+    /// nothing personal is hard-coded into a public repository, and it keeps
+    /// working if the 100.x address is ever reassigned.
+    static let everywhereNames = ["jarvis"]
+
     func search() {
         task?.cancel()
         found = []
         error = nil
         progress = 0
-
-        guard let base = Self.subnetPrefix() else {
-            error = "This phone does not seem to be on a Wi-Fi network."
-            return
-        }
         searching = true
 
+        // Read before the task starts, and no longer guarded against: on
+        // cellular this is nil, and that is not a reason to refuse to look.
+        let base = Self.subnetPrefix()
+
         task = Task { [port] in
+            // STEP ONE - the addresses that are true everywhere. A handful of
+            // probes with a proper timeout, because a tailnet round trip over
+            // 5G is not the 1.2 second affair a LAN one is.
+            let anywhere = Self.everywhereNames + Defaults.addresses
+            await self.sweep(anywhere, port: port, timeout: 4)
+            progress = 0.2
+            if Task.isCancelled { searching = false; return }
+
+            // STEP TWO - the local sweep, if there is a local network at all.
+            guard let base else {
+                searching = false
+                progress = 1
+                if found.isEmpty {
+                    error = "Nothing answered. Away from home the PC is reached over Tailscale - check Tailscale is switched on in the phone's settings, or type the address below."
+                }
+                return
+            }
+
             // Forty at a time, in flat batches. Enough that the sweep finishes
             // in a second or two; few enough that iOS does not start refusing
             // sockets, which it does somewhere north of a couple of hundred
@@ -82,23 +143,54 @@ final class Discovery: ObservableObject {
             while start <= 254 {
                 if Task.isCancelled { break }
                 let end = min(254, start + batch - 1)
-                let hits = await withTaskGroup(of: FoundPC?.self,
-                                               returning: [FoundPC].self) { group in
-                    for n in start...end {
-                        let host = "\(base).\(n)"
-                        group.addTask { await Discovery.probe(host: host, port: port) }
-                    }
-                    var out: [FoundPC] = []
-                    for await r in group { if let r { out.append(r) } }
-                    return out
-                }
-                for pc in hits where !found.contains(pc) { found.append(pc) }
-                progress = Double(end) / 254.0
+                await self.sweep((start...end).map { "\(base).\($0)" },
+                                 port: port, timeout: 1.2)
+                progress = 0.2 + 0.8 * Double(end) / 254.0
                 start = end + 1
             }
             searching = false
             progress = 1
         }
+    }
+
+    /// Ask a list of hosts at once, and fold whatever answers into `found`.
+    private func sweep(_ hosts: [String], port: UInt16,
+                       timeout: TimeInterval) async {
+        let hits = await withTaskGroup(of: FoundPC?.self,
+                                       returning: [FoundPC].self) { group in
+            for host in hosts {
+                group.addTask {
+                    await Discovery.probe(host: host, port: port,
+                                          timeout: timeout)
+                }
+            }
+            var out: [FoundPC] = []
+            for await r in group { if let r { out.append(r) } }
+            return out
+        }
+        for pc in hits { merge(pc) }
+    }
+
+    /// ONE ROW PER PC, NOT ONE PER ADDRESS.
+    ///
+    /// The same machine now answers as `jarvis`, as 100.x and as 192.168.x, and
+    /// three identical-looking rows would be a worse setup screen than the one
+    /// this replaced. The address that answered FIRST is kept as the row's own,
+    /// and because the everywhere-names are asked first that is the tailnet
+    /// name - which is exactly the address you want written into the Keychain
+    /// and reconnected to on a train. The rest become alternates.
+    private func merge(_ pc: FoundPC) {
+        guard let i = found.firstIndex(where: { $0.name == pc.name }) else {
+            found.append(pc)
+            return
+        }
+        var kept = found[i]
+        for a in [pc.address] + pc.alternates {
+            if a != kept.address && !kept.alternates.contains(a) {
+                kept.alternates.append(a)
+            }
+        }
+        found[i] = kept
     }
 
     func stop() {
@@ -108,15 +200,18 @@ final class Discovery: ObservableObject {
     }
 
     /// Is there a Jarvis at this address? Nil if not, a description if so.
-    nonisolated static func probe(host: String, port: UInt16) async -> FoundPC? {
-        guard let name = await hello(host: host, port: port, timeout: 1.2) else {
+    nonisolated static func probe(host: String, port: UInt16,
+                                  timeout: TimeInterval = 1.2) async -> FoundPC? {
+        guard let h = await hello(host: host, port: port, timeout: timeout) else {
             return nil
         }
-        return FoundPC(name: name.0, address: host, port: port, paired: name.1)
+        return FoundPC(name: h.name, address: host, port: port,
+                       paired: h.paired,
+                       alternates: h.addresses.filter { $0 != host })
     }
 
     nonisolated static func hello(host: String, port: UInt16,
-                      timeout: TimeInterval = 4) async -> (String, Bool)? {
+                      timeout: TimeInterval = 4) async -> Hello? {
         guard let url = URL(string: "http://\(host):\(port)/api/hello") else {
             return nil
         }
@@ -128,7 +223,9 @@ final class Discovery: ObservableObject {
               let obj = try? JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
               obj["jarvis"] as? Bool == true else { return nil }
-        return (obj["name"] as? String ?? host, obj["paired"] as? Bool ?? false)
+        return Hello(name: obj["name"] as? String ?? host,
+                     paired: obj["paired"] as? Bool ?? false,
+                     addresses: obj["addresses"] as? [String] ?? [])
     }
 
     /// The first three octets of this phone's Wi-Fi address, e.g. "192.168.1".

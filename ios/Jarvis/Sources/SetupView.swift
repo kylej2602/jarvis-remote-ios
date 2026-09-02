@@ -1,12 +1,17 @@
 //
 //  SetupView.swift - finding the PC and pairing with it.
 //
-//  Two paths, in the order they should be tried: sweep this phone's own subnet
-//  asking every address whether it is a Jarvis, and, for the networks where
-//  that does not work - a guest VLAN with client isolation, a /16, a machine
-//  reached over Tailscale - type the address Jarvis printed in his log. Both
-//  end at the same place: a six-digit code that Jarvis reads out loud,
-//  exchanged for a key that goes in the Keychain.
+//  Two paths, in the order they should be tried: ask Discovery, which tries the
+//  PC's tailnet name first and only then sweeps this phone's own subnet, and,
+//  for the networks where neither works - a guest VLAN with client isolation, a
+//  /16, Tailscale switched off - type an address or a name by hand. Both end at
+//  the same place: a six-digit code that Jarvis reads out loud, exchanged for a
+//  key that goes in the Keychain.
+//
+//  The field below takes a NAME as readily as an address, which is why its
+//  keyboard is the ordinary one and not the number pad it used to be. Typing
+//  `jarvis` is the fastest way out of every away-from-home failure there is,
+//  and it could not be typed at all on a decimal pad.
 //
 //  The code is spoken rather than shown as a QR because of how this is actually
 //  used: he is across the room, the PC is over there, and asking "Jarvis, pair
@@ -71,7 +76,8 @@ struct SetupView: View {
         VStack(spacing: 18) {
             if discovery.searching {
                 ProgressView().tint(Palette.hot)
-                Text("looking on this network…")
+                Text(discovery.progress < 0.2
+                     ? "looking over Tailscale…" : "looking on this network…")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(Palette.dim)
             }
@@ -102,7 +108,7 @@ struct SetupView: View {
 
             if !discovery.searching && discovery.found.isEmpty {
                 Text(discovery.error
-                     ?? "Nothing answered. Make sure Jarvis is running with\nJARVIS_REMOTE=1, and that this phone is on the same Wi-Fi.")
+                     ?? "Nothing answered. Make sure Jarvis is running with\nJARVIS_REMOTE=1 — and away from home, that\nTailscale is switched on here and on the PC.")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(Palette.dim)
                     .multilineTextAlignment(.center)
@@ -116,12 +122,13 @@ struct SetupView: View {
             Divider().background(Palette.line).padding(.horizontal, 40)
 
             VStack(spacing: 12) {
-                Text("or type the address Jarvis logged")
+                Text("or type a name or address —  jarvis  works anywhere")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Palette.dim)
+                    .multilineTextAlignment(.center)
                 HStack(spacing: 8) {
-                    field("192.168.1.10", text: $manualHost)
-                        .keyboardType(.decimalPad)
+                    field("jarvis", text: $manualHost)
+                        .keyboardType(.default)
                     field("8765", text: $manualPort)
                         .keyboardType(.numberPad)
                         .frame(width: 90)
@@ -200,10 +207,11 @@ struct SetupView: View {
         busy = true
         message = nil
         Task {
-            if let (name, paired) = await Discovery.hello(host: host, port: port) {
+            if let h = await Discovery.hello(host: host, port: port) {
                 busy = false
-                choose(FoundPC(name: name, address: host, port: port,
-                               paired: paired))
+                choose(FoundPC(name: h.name, address: host, port: port,
+                               paired: h.paired,
+                               alternates: h.addresses.filter { $0 != host }))
             } else {
                 busy = false
                 message = "Nothing answered at \(host):\(port)."

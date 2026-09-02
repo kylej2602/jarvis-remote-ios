@@ -77,6 +77,18 @@
       reachable_addresses() puts that name AHEAD of the bare 100.x address for
       this exact reason.
 
+      The name the app actually tries FIRST is the bare, unqualified `jarvis`
+      (Discovery.everywhereNames), and that is covered by the local-networking
+      exception above rather than by the ts.net one: NSAllowsLocalNetworking
+      permits cleartext to unqualified host names - names with no dot in them -
+      precisely because those can only ever be resolved by something local, and
+      here that something is Tailscale's MagicDNS, which installs the tailnet
+      suffix as a search domain on the phone. So `jarvis` is allowed on any
+      network, `jarvis.<tailnet>.ts.net` is allowed by the exception domain, and
+      the bare 100.x address is allowed by neither - which is why it is last in
+      the candidate list rather than first, and why nothing but the raw socket
+      ever depends on it.
+
       Deliberately not NSAllowsArbitraryLoads, which is what most people reach
       for and which switches ATS off for the entire app.
     -->

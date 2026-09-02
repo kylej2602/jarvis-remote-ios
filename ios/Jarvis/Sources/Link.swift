@@ -259,6 +259,28 @@ final class Link: ObservableObject {
             }
         }
         c.start(queue: .global(qos: .userInteractive))
+
+        // A CONNECT DEADLINE, BECAUSE NWConnection DOES NOT HAVE ONE.
+        //
+        // The failover below is only as fast as the failure that triggers it,
+        // and the failure that matters most is the slowest one there is. A TCP
+        // connect to 192.168.1.226 from a coffee shop does not get refused -
+        // there is no such host to refuse it - so the SYN is simply retried by
+        // the kernel until it gives up, which on iOS is the best part of a
+        // minute. Without this line, "it reconnects when I get to the car" was
+        // true only when leaving the house dropped the route immediately;
+        // arriving somewhere else that happens to use 192.168.1.x meant a
+        // minute of nothing before the tailnet address was even tried.
+        //
+        // Four seconds is well beyond any real handshake, including a tailnet
+        // one being relayed over DERP on the far side of the country, and far
+        // short of the kernel's own patience.
+        let attempted = host
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            guard let self, self.conn === c, !self.connected else { return }
+            self.lastError = "no answer from \(attempted)"
+            self.dropped()
+        }
     }
 
     private func dropped() {

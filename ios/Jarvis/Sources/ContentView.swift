@@ -67,8 +67,23 @@ final class AppModel: ObservableObject {
         // was picked, so a connection made at home still knows the tailnet
         // address to fall back to the moment the phone leaves the house. See
         // Link.candidates.
+        //
+        // The tailnet NAME is put in unconditionally, ahead of anything that
+        // was remembered. It costs one failed DNS lookup in the worst case, and
+        // it closes the one hole this whole mechanism had: an install that was
+        // paired before any of this existed, or restored from a backup, holds a
+        // lastHost of 192.168.1.x and an empty address list, and would have had
+        // exactly nothing to fall back to away from home. Now it always has
+        // one route that does not depend on which Wi-Fi the phone is on.
+        var alts: [String] = []
+        for a in Discovery.everywhereNames + pc.alternates + Defaults.addresses {
+            if a != pc.address && !alts.contains(a) {
+                alts.append(a)
+            }
+        }
+        Defaults.saveAddresses([pc.address] + alts, port: pc.port)
         link.connect(host: pc.address, port: pc.port, token: token,
-                     alternates: Defaults.addresses)
+                     alternates: alts)
         connectedOnce = true
     }
 
