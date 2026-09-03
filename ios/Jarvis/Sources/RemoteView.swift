@@ -56,6 +56,9 @@ struct RemoteTab: View {
     @State private var typed = ""
     @State private var sentSoFar = ""
     @State private var keyboardUp = false
+    /// When the picture was last tapped. The keyboard is only allowed up in
+    /// the moment or so after one - see the onChange in `body`.
+    @State private var lastTapAt: CFAbsoluteTime = 0
     @FocusState private var typingFocused: Bool
 
     // Click rings, cleared on a timer. Capped so a burst of clicks cannot
@@ -65,25 +68,41 @@ struct RemoteTab: View {
     var body: some View {
         VStack(spacing: 0) {
             if !fullScreen { StatusBar() }
-            screenPicker
+            if !fullScreen { screenPicker }
             viewer
             if keyboardUp { keyboardBar }
             if !fullScreen && !keyboardUp { controls }
         }
-        // The PC's caret moved into something that takes typing. On iOS this
-        // is allowed to raise the keyboard directly - no user gesture needed -
-        // so clicking a search box on the PC puts the keyboard up here.
+        // THE TAB BAR HAS TO GO, and this line is why "it won't full screen a
+        // monitor" was true. The flag hid the status strip and the buttons and
+        // dimmed the screen picker, and left the picture in a box with a tab
+        // bar under it and a picker over it - about seventy points of chrome on
+        // a phone, on both edges, which is not full screen by any reading. The
+        // picker is now hidden outright rather than faded, and the tab bar this
+        // view is inside is hidden here; nothing else can reach it.
+        .toolbar(fullScreen ? .hidden : .visible, for: .tabBar)
+        // THE KEYBOARD COMES UP BECAUSE YOU TAPPED A TEXT BOX, and for no
+        // other reason.
+        //
+        // It used to come up whenever the PC reported that the focused control
+        // takes typing - and remote.py answers that partly from the cursor
+        // SHAPE, treating an I-beam as a yes. So merely dragging the pointer
+        // across a page of text raised the keyboard, over and over, with
+        // nothing pressed. Half the screen would disappear while you were
+        // trying to look at it.
+        //
+        // A tap now opens a short window, and only a report that arrives inside
+        // that window counts. That is the difference between "the caret is
+        // somewhere typable" and "I just clicked a search bar", and the second
+        // one is what was asked for. Everything after that is unchanged: the
+        // field below is a real first responder, so what appears is the phone's
+        // own keyboard, whatever iOS it is running.
         .onChange(of: link.cursor.acceptsTyping) { _, takes in
-            guard live else { return }
-            if takes {
-                keyboardUp = true
-                typed = ""; sentSoFar = ""
-                typingFocused = true
-            }
-            // Deliberately NOT dismissed when it goes false. The caret blinks
-            // out for all sorts of reasons - a menu opening, a repaint - and a
-            // keyboard that drops mid-sentence is far more annoying than one
-            // that waits to be dismissed with DONE.
+            guard live, takes, !keyboardUp else { return }
+            guard CFAbsoluteTimeGetCurrent() - lastTapAt < 1.5 else { return }
+            keyboardUp = true
+            typed = ""; sentSoFar = ""
+            typingFocused = true
         }
         .background(Palette.bg.ignoresSafeArea())
         .statusBarHidden(fullScreen)
@@ -189,9 +208,17 @@ struct RemoteTab: View {
                     }
                 }
 
-                // Full screen is a double tap on the picture, which is what
-                // everyone tries first, plus a corner button so it is
-                // discoverable at all.
+                // Full screen is the corner button, and ONLY the corner
+                // button.
+                //
+                // It used to be a double tap on the picture as well, and that
+                // was two bugs wearing one coat. The picture already carries a
+                // drag recogniser with a zero minimum distance, so the two
+                // competed and the double tap frequently never fired at all -
+                // "it won't full screen when a monitor is selected". And when
+                // it did fire, both taps had already gone to the PC as clicks,
+                // so asking for full screen double-clicked whatever was under
+                // your finger. A button cannot do either.
                 VStack {
                     HStack {
                         Spacer()
@@ -199,72 +226,128 @@ struct RemoteTab: View {
                             Image(systemName: fullScreen
                                   ? "arrow.down.right.and.arrow.up.left"
                                   : "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(Palette.ink)
-                                .padding(9)
+                                .frame(width: 44, height: 44)
                                 .background(Circle().fill(Color.black.opacity(0.55)))
                         }
-                        .padding(10)
+                        .padding(8)
                     }
                     Spacer()
                     if fullScreen { fullScreenBar }
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) { fullScreen.toggle() }
         }
     }
 
-    /// A drag is a pointer move; a tap is a click on the real pixel.
+    /// A drag puts the pointer where your finger is; a tap clicks there.
     ///
-    /// Both in one gesture rather than two recognisers, because a tap and a
-    /// very short drag are the same event on a touchscreen - a finger always
-    /// moves a little - and two competing recognisers means every click is also
-    /// a small pointer nudge, which lands it on the wrong thing.
+    /// ABSOLUTE, NOT RELATIVE, AND THAT IS THE WHOLE OF "THE MOUSE IS BUGGY ON
+    /// ANOTHER NETWORK".
+    ///
+    /// This used to send deltas: each move said "go 14 pixels right from
+    /// wherever you are". Three things then went wrong at once, and every one
+    /// of them is worse the further away the phone is.
+    ///
+    ///   * A delta is not self-contained. Lose one, reorder two, and the
+    ///     pointer is permanently out of step with the finger for the rest of
+    ///     the drag - there is nothing in a later packet that can correct it.
+    ///     On a LAN that essentially never happens; over a tailnet being
+    ///     relayed it happens constantly, and it reads exactly as "buggy".
+    ///   * SwiftUI reports a drag at the display's refresh rate, so it sent up
+    ///     to 120 packets a second. Over a relay that is a queue, and a queue
+    ///     is lag that grows for as long as the finger keeps moving.
+    ///   * The scale factor was the monitor's width over the view's width. On
+    ///     ALL SCREENS that is a 5760-pixel union over a 390-point phone -
+    ///     nearly fifteen desktop pixels per point - so the smallest tremor in
+    ///     a finger threw the pointer across a monitor.
+    ///
+    /// An absolute position has none of those properties. Every packet carries
+    /// the whole answer, so a lost one costs a single skipped frame and the
+    /// next one is right again; the finger and the pointer cannot drift apart
+    /// because the finger IS the position; and the union of three monitors maps
+    /// as correctly as one does. It is also what the tap below has always done,
+    /// so dragging and tapping finally agree with each other.
+    ///
+    /// Coalesced to one packet per frame at most - see flushPointer.
     private func pointerGesture(in view: CGSize, image: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { v in
-                guard v.translation.width != 0 || v.translation.height != 0 else { return }
-                if hypot(v.translation.width, v.translation.height) > 6 {
+                if !dragging,
+                   hypot(v.translation.width, v.translation.height) > 6 {
                     dragging = true
-                    let dx = v.location.x - lastDrag.x
-                    let dy = v.location.y - lastDrag.y
-                    if lastDrag != .zero {
-                        // Scaled to the real desktop: a finger crossing the
-                        // phone should cross the monitor, not a phone-sized
-                        // patch of it.
-                        let d = display
-                        let sx = CGFloat(d?.w ?? 1920) / max(1, view.width)
-                        let sy = CGFloat(d?.h ?? 1080) / max(1, view.height)
-                        link.move(dx: Int(dx * sx), dy: Int(dy * sy))
-                    }
-                    lastDrag = v.location
                 }
+                guard dragging else { return }
+                pending = v.location
+                flushPointer(in: view, image: image)
             }
             .onEnded { v in
-                defer { dragging = false; lastDrag = .zero }
-                guard !dragging else { return }
+                defer { dragging = false; pending = nil; lastSent = 0 }
+                if dragging {
+                    // The last position ALWAYS goes, throttle or no throttle.
+                    // Dropping the final packet of a drag is how a pointer ends
+                    // up a few pixels short of the thing being dragged onto.
+                    if let pt = absolute(v.location, in: view, image: image) {
+                        link.moveAbsolute(x: pt.0, y: pt.1)
+                    }
+                    return
+                }
                 tap(v.location, in: view, image: image)
             }
     }
 
     @State private var dragging = false
-    @State private var lastDrag: CGPoint = .zero
+    @State private var pending: CGPoint?
+    @State private var lastSent: CFAbsoluteTime = 0
+
+    /// At most one pointer packet every 16 ms, carrying the newest position.
+    ///
+    /// Not a timer and not a buffer: there is only ever one useful position -
+    /// the latest - so anything older is simply dropped. Sixty a second is
+    /// smoother than any screen stream this is drawn over and an eighth of what
+    /// the old code put on the wire.
+    private func flushPointer(in view: CGSize, image: CGSize) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastSent >= 0.016, let p = pending else { return }
+        lastSent = now
+        pending = nil
+        guard let pt = absolute(p, in: view, image: image) else { return }
+        link.moveAbsolute(x: pt.0, y: pt.1)
+    }
+
+    /// A point in the view, as a real pixel on the monitor being watched.
+    ///
+    /// Goes through ShownImage, the same letterbox maths the pointer overlay
+    /// uses, so what is drawn and what is sent cannot disagree.
+    private func absolute(_ point: CGPoint, in view: CGSize,
+                          image: CGSize) -> (Int, Int)? {
+        guard let d = display else { return nil }
+        let shown = ShownImage(view: view, image: image)
+        let fx = (point.x - shown.origin.x) / shown.size.width
+        let fy = (point.y - shown.origin.y) / shown.size.height
+        // Clamped rather than rejected: a finger that slides off the edge of
+        // the picture mid-drag should pin the pointer to that edge, not freeze
+        // it wherever it happened to be when the finger left.
+        let cx = min(max(fx, 0), 1), cy = min(max(fy, 0), 1)
+        return (d.x + Int(cx * CGFloat(d.w)), d.y + Int(cy * CGFloat(d.h)))
+    }
 
     private var display: Display? {
         link.displays.first(where: { $0.index == monitor })
     }
 
     private func tap(_ point: CGPoint, in view: CGSize, image: CGSize) {
-        guard let d = display else { return }
-        // The same mapping the pointer overlay uses, so the ring lands exactly
-        // where the pointer went rather than half a letterbox away from it.
+        // Outside the picture (the letterbox bars) is not a click.
         let shown = ShownImage(view: view, image: image)
         let fx = (point.x - shown.origin.x) / shown.size.width
         let fy = (point.y - shown.origin.y) / shown.size.height
         guard (0...1).contains(fx), (0...1).contains(fy) else { return }
-        link.moveAbsolute(x: d.x + Int(fx * CGFloat(d.w)),
-                          y: d.y + Int(fy * CGFloat(d.h)))
+        guard let pt = absolute(point, in: view, image: image) else { return }
+        // Stamped BEFORE the click goes out, so the PC's answer about whether
+        // what was clicked takes typing arrives inside the window that raises
+        // the keyboard. See the onChange in `body`.
+        lastTapAt = CFAbsoluteTimeGetCurrent()
+        link.moveAbsolute(x: pt.0, y: pt.1)
         link.click(.left)
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         ring(at: point, button: .left)
