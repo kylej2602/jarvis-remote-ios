@@ -182,7 +182,6 @@ struct RemoteTab: View {
                         .resizable()
                         .interpolation(.medium)
                         .aspectRatio(contentMode: .fit)
-                        .gesture(pointerGesture(in: geo.size, image: img.size))
 
                     // The PC's own mouse, drawn on top. It is not in the JPEG:
                     // Windows leaves the cursor out of a framebuffer grab, so
@@ -193,6 +192,38 @@ struct RemoteTab: View {
                                    shown: shown)
 
                     ForEach(pings) { $0 }
+                    touchGhost
+
+                    // TOUCH IS READ HERE, ON A LAYER THE SIZE OF THE WHOLE
+                    // VIEWER, AND THAT IS THE BUG THIS FIXES.
+                    //
+                    // The gesture used to hang off the Image. `.aspectRatio(_,
+                    // contentMode: .fit)` makes the Image view exactly the size
+                    // of the letterboxed picture, so a DragGesture in `.local`
+                    // space reported coordinates measured from the PICTURE's
+                    // top-left. The maths then subtracted `shown.origin` - the
+                    // size of the black bar - as though the coordinates had been
+                    // measured from the VIEWER's top-left. The bar was counted
+                    // twice.
+                    //
+                    // On a three-monitor union letterboxed into a phone that
+                    // bar is most of the screen, so nearly every touch produced
+                    // a negative fraction: taps were thrown away by the 0...1
+                    // guard and drags were clamped, which parks the pointer in
+                    // the top-left corner of the desktop and leaves it there.
+                    // That is exactly what the recording shows - a finger in
+                    // the middle of the picture and the cursor pinned to the
+                    // corner of the top monitor.
+                    //
+                    // A clear layer pinned to `geo.size` removes the ambiguity
+                    // rather than papering over it: `.local` here IS the
+                    // viewer's space, which is the same space PointerOverlay
+                    // positions itself in, so what is drawn and what is sent
+                    // are now measured identically by construction.
+                    Color.clear
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .contentShape(Rectangle())
+                        .gesture(pointerGesture(in: geo.size, image: img.size))
                 } else {
                     VStack(spacing: 10) {
                         Text(live ? "waiting for a frame…" : "pick a screen")
@@ -279,10 +310,14 @@ struct RemoteTab: View {
                 }
                 guard dragging else { return }
                 pending = v.location
+                ghost = v.location
                 flushPointer(in: view, image: image)
             }
             .onEnded { v in
-                defer { dragging = false; pending = nil; lastSent = 0 }
+                defer {
+                    dragging = false; pending = nil; lastSent = 0
+                    fadeGhost()
+                }
                 if dragging {
                     // The last position ALWAYS goes, throttle or no throttle.
                     // Dropping the final packet of a drag is how a pointer ends
@@ -299,6 +334,8 @@ struct RemoteTab: View {
     @State private var dragging = false
     @State private var pending: CGPoint?
     @State private var lastSent: CFAbsoluteTime = 0
+    /// The finger's own position, drawn while the PC catches up. See touchGhost.
+    @State private var ghost: CGPoint?
 
     /// At most one pointer packet every 16 ms, carrying the newest position.
     ///
@@ -313,6 +350,15 @@ struct RemoteTab: View {
         pending = nil
         guard let pt = absolute(p, in: view, image: image) else { return }
         link.moveAbsolute(x: pt.0, y: pt.1)
+    }
+
+    /// Clear the finger marker once the PC has had time to catch up.
+    private func fadeGhost() {
+        let mine = ghost
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(700))
+            if ghost == mine { withAnimation(.easeOut(duration: 0.25)) { ghost = nil } }
+        }
     }
 
     /// A point in the view, as a real pixel on the monitor being watched.
@@ -347,6 +393,8 @@ struct RemoteTab: View {
         // what was clicked takes typing arrives inside the window that raises
         // the keyboard. See the onChange in `body`.
         lastTapAt = CFAbsoluteTimeGetCurrent()
+        ghost = point
+        fadeGhost()
         link.moveAbsolute(x: pt.0, y: pt.1)
         link.click(.left)
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -503,6 +551,27 @@ struct RemoteTab: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial)
+    }
+
+    /// Where the finger last put the pointer, drawn until the PC catches up.
+    ///
+    /// Over a link with 250 ms of latency the picture is a quarter of a second
+    /// behind the finger, and the cursor overlay is driven by the PC - so for
+    /// that whole quarter second there is nothing on screen where you just
+    /// touched. This is the missing half of "I want to see what I am doing":
+    /// the ring appears under the finger instantly and fades as the real
+    /// pointer arrives at the same place.
+    private var touchGhost: some View {
+        Group {
+            if let g = ghost {
+                Circle()
+                    .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
+                    .frame(width: 26, height: 26)
+                    .position(g)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
     }
 
     private var controls: some View {

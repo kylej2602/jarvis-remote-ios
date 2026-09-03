@@ -73,15 +73,36 @@ struct PointerOverlay: View {
         if cursor.seen, cursor.visible, let d = display {
             let placed = shown.place(cursor.x, cursor.y, on: d)
             ZStack {
+                // A DARK HALO UNDER EVERYTHING ELSE.
+                //
+                // A cyan ring is easy to find on a dark desktop and nearly
+                // invisible on a bright one - a white page, a photo, the
+                // Discord light theme - which is most of what anyone actually
+                // looks at. One soft black disc behind the ring gives it
+                // something to be seen against whatever is underneath, and
+                // costs nothing on a dark background because it is already
+                // dark there.
+                Circle()
+                    .fill(RadialGradient(
+                        colors: [Color.black.opacity(0.55), Color.black.opacity(0)],
+                        center: .center, startRadius: 4, endRadius: 30))
+                    .frame(width: 60, height: 60)
+
+                // The ring itself: a white outline OUTSIDE the cyan one, so
+                // there is a light edge and a dark edge whatever it is over.
+                Circle()
+                    .stroke(Color.white.opacity(0.85), lineWidth: 1)
+                    .frame(width: 46, height: 46)
+
                 Circle()
                     .stroke(Palette.hot,
-                            style: StrokeStyle(lineWidth: 2,
-                                               dash: placed.onScreen ? [] : [4, 3]))
-                    .background(Circle().fill(Palette.hot.opacity(0.13)))
-                    .frame(width: 34, height: 34)
-                    .shadow(color: Palette.hot.opacity(0.8), radius: 7)
-                    .scaleEffect(breathing ? 1.16 : 1.0)
-                    .opacity(breathing ? 0.55 : 0.9)
+                            style: StrokeStyle(lineWidth: 3,
+                                               dash: placed.onScreen ? [] : [5, 4]))
+                    .background(Circle().fill(Palette.hot.opacity(0.14)))
+                    .frame(width: 42, height: 42)
+                    .shadow(color: Palette.hot.opacity(0.9), radius: 9)
+                    .scaleEffect(breathing ? 1.14 : 1.0)
+                    .opacity(breathing ? 0.62 : 0.95)
                     .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true),
                                value: breathing)
 
