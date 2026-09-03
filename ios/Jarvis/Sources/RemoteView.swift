@@ -52,12 +52,38 @@ struct RemoteTab: View {
     @State private var confirmAction: PowerAction?
     @State private var note = ""
 
+    // The keyboard. `typed` is a send buffer, not a document - see sync().
+    @State private var typed = ""
+    @State private var sentSoFar = ""
+    @State private var keyboardUp = false
+    @FocusState private var typingFocused: Bool
+
+    // Click rings, cleared on a timer. Capped so a burst of clicks cannot
+    // grow the view tree without bound.
+    @State private var pings: [ClickPing] = []
+
     var body: some View {
         VStack(spacing: 0) {
             if !fullScreen { StatusBar() }
             screenPicker
             viewer
-            if !fullScreen { controls }
+            if keyboardUp { keyboardBar }
+            if !fullScreen && !keyboardUp { controls }
+        }
+        // The PC's caret moved into something that takes typing. On iOS this
+        // is allowed to raise the keyboard directly - no user gesture needed -
+        // so clicking a search box on the PC puts the keyboard up here.
+        .onChange(of: link.cursor.acceptsTyping) { _, takes in
+            guard live else { return }
+            if takes {
+                keyboardUp = true
+                typed = ""; sentSoFar = ""
+                typingFocused = true
+            }
+            // Deliberately NOT dismissed when it goes false. The caret blinks
+            // out for all sorts of reasons - a menu opening, a repaint - and a
+            // keyboard that drops mid-sentence is far more annoying than one
+            // that waits to be dismissed with DONE.
         }
         .background(Palette.bg.ignoresSafeArea())
         .statusBarHidden(fullScreen)
@@ -132,11 +158,22 @@ struct RemoteTab: View {
             ZStack {
                 Color.black
                 if let data = link.frame, let img = UIImage(data: data) {
+                    let shown = ShownImage(view: geo.size, image: img.size)
                     Image(uiImage: img)
                         .resizable()
                         .interpolation(.medium)
                         .aspectRatio(contentMode: .fit)
                         .gesture(pointerGesture(in: geo.size, image: img.size))
+
+                    // The PC's own mouse, drawn on top. It is not in the JPEG:
+                    // Windows leaves the cursor out of a framebuffer grab, so
+                    // without this the picture has no pointer in it at all and
+                    // there is no way to see what you are about to click.
+                    PointerOverlay(cursor: link.cursor,
+                                   display: display,
+                                   shown: shown)
+
+                    ForEach(pings) { $0 }
                 } else {
                     VStack(spacing: 10) {
                         Text(live ? "waiting for a frame…" : "pick a screen")
@@ -220,17 +257,150 @@ struct RemoteTab: View {
 
     private func tap(_ point: CGPoint, in view: CGSize, image: CGSize) {
         guard let d = display else { return }
-        let scale = min(view.width / image.width, view.height / image.height)
-        let shown = CGSize(width: image.width * scale, height: image.height * scale)
-        let origin = CGPoint(x: (view.width - shown.width) / 2,
-                             y: (view.height - shown.height) / 2)
-        let fx = (point.x - origin.x) / shown.width
-        let fy = (point.y - origin.y) / shown.height
+        // The same mapping the pointer overlay uses, so the ring lands exactly
+        // where the pointer went rather than half a letterbox away from it.
+        let shown = ShownImage(view: view, image: image)
+        let fx = (point.x - shown.origin.x) / shown.size.width
+        let fy = (point.y - shown.origin.y) / shown.size.height
         guard (0...1).contains(fx), (0...1).contains(fy) else { return }
         link.moveAbsolute(x: d.x + Int(fx * CGFloat(d.w)),
                           y: d.y + Int(fy * CGFloat(d.h)))
         link.click(.left)
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        ring(at: point, button: .left)
+    }
+
+    /// Leave a ring where a click was sent.
+    ///
+    /// Over a link with real latency there is otherwise no way to tell a click
+    /// that landed from one the PC was too busy to take, and the instinct when
+    /// you cannot tell is to tap again - which turns a remote single click into
+    /// a double click on something that did not want one.
+    private func ring(at point: CGPoint, button: MouseButton) {
+        let ping = ClickPing(at: point, button: button)
+        pings.append(ping)
+        if pings.count > 6 { pings.removeFirst(pings.count - 6) }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            pings.removeAll { $0.id == ping.id }
+        }
+    }
+
+    // MARK: - the keyboard
+    //
+    // "click and type with the virtual keyboard, for all things typing, when
+    //  clicked in the type box or search bar"
+    //
+    // Two things make that work. The first is knowing WHEN: remote.py now
+    // reports whether the focused control on the PC accepts typing - it asks
+    // Windows for the foreground thread's caret, and treats an I-beam cursor
+    // as the same answer - and that arrives on every cursor packet. So the
+    // keyboard comes up the moment a text box is clicked, without being asked
+    // for. (This is where the phone beats a browser: UIKit will raise the
+    // keyboard from a programmatic focus, where Safari only does it inside a
+    // user gesture.)
+    //
+    // The second is WHAT to send. A phone keyboard is not a keyboard: it
+    // autocorrects, it predicts, and it replaces the whole word you just typed
+    // when you hit space. Forwarding keystrokes would forward the wrong ones.
+    // So the field's VALUE is diffed against what has already been sent - the
+    // common prefix stays, the rest is backspaced off the PC and the new tail
+    // typed. An autocorrect that rewrites "teh" into "the" arrives on the PC as
+    // two backspaces and "he", which is exactly what happened.
+
+    private var keyboardBar: some View {
+        VStack(spacing: 8) {
+            TextField("type - it goes to the PC as you type", text: $typed, axis: .horizontal)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($typingFocused)
+                .font(.system(size: 16, design: .monospaced))
+                .foregroundStyle(Palette.ink)
+                .padding(11)
+                .background(RoundedRectangle(cornerRadius: 8)
+                    .fill(Palette.bg)
+                    .overlay(RoundedRectangle(cornerRadius: 8)
+                        .stroke(Palette.hot, lineWidth: 1)))
+                .submitLabel(.return)
+                .onSubmit {
+                    sync()
+                    link.key("enter")
+                    typed = ""; sentSoFar = ""
+                    // Keep it up: pressing return in a search box is rarely the
+                    // last thing anyone wants to type.
+                    typingFocused = true
+                }
+                .onChange(of: typed) { _, _ in sync() }
+
+            HStack(spacing: 7) {
+                ForEach(["escape", "tab", "backspace", "left", "right", "enter"], id: \.self) { name in
+                    Button {
+                        sync()
+                        link.key(name)
+                        // Backspace and the arrows move the PC's own caret, so
+                        // what this phone believes it has sent is no longer
+                        // true. Resetting the buffer stops the next keystroke
+                        // trying to correct text that is not there any more.
+                        typed = ""; sentSoFar = ""
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } label: {
+                        Text(keyLabel(name))
+                            .font(.system(size: 13, design: .monospaced))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .stroke(Palette.hot, lineWidth: 1))
+                            .foregroundStyle(Palette.hot)
+                    }
+                }
+                Button {
+                    keyboardUp = false
+                    typingFocused = false
+                } label: {
+                    Text("DONE")
+                        .font(.system(size: 13, design: .monospaced))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(RoundedRectangle(cornerRadius: 7)
+                            .fill(Palette.hot.opacity(0.22)))
+                        .foregroundStyle(Palette.ink)
+                }
+            }
+        }
+        .padding(9)
+        .background(Palette.panel)
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(Palette.hot),
+                 alignment: .top)
+    }
+
+    private func keyLabel(_ name: String) -> String {
+        switch name {
+        case "escape": return "ESC"
+        case "tab": return "TAB"
+        case "backspace": return "\u{232B}"
+        case "left": return "\u{2190}"
+        case "right": return "\u{2192}"
+        case "enter": return "\u{21B5}"
+        default: return name
+        }
+    }
+
+    /// Send only what changed, as backspaces and a new tail.
+    private func sync() {
+        guard typed != sentSoFar else { return }
+        let now = Array(typed), before = Array(sentSoFar)
+        var k = 0
+        while k < min(now.count, before.count), now[k] == before[k] { k += 1 }
+        for _ in 0..<(before.count - k) { link.key("backspace") }
+        if now.count > k { link.type(String(now[k...])) }
+        sentSoFar = typed
+        // The field is a send buffer, not a document. Left to grow it would end
+        // up a paragraph of already-typed text on one line, so once a word is
+        // safely on the PC only the tail is kept.
+        if sentSoFar.count > 120 {
+            sentSoFar = String(sentSoFar.suffix(40))
+            typed = sentSoFar
+        }
     }
 
     // MARK: - the bars

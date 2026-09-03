@@ -43,6 +43,42 @@ enum InputOp: UInt8 {
 private enum OutTag: UInt8 {
     case screen = 1         // [1][w:2][h:2][jpeg]
     case audio  = 2         // [2][mu-law] - the PC's microphone
+    case cursor = 3         // [3][x:i32][y:i32][kind:u8][flags:u8]
+}
+
+/// What the pointer looks like right now, and whether typing would land.
+///
+/// Windows does not composite the cursor into a screen capture, so the JPEG
+/// arrives with no pointer in it at all - which makes remote control a guessing
+/// game: you drag, something scrolls, and you have no idea what you are about
+/// to click. Drawing it into the frame server-side would have been the obvious
+/// fix and is the wrong one, because the video runs at four to eight frames a
+/// second to fit down a phone uplink and a pointer that moves eight times a
+/// second reads as broken.
+///
+/// So the position travels separately, in eleven bytes, thirty times a second,
+/// and RemoteView draws it. That is about 330 bytes a second - a thousandth of
+/// what one JPEG frame costs - and the pointer stays smooth however slow the
+/// picture underneath it is.
+struct CursorState: Equatable {
+    /// Virtual-desktop pixels: the same space Display.x/.y are in.
+    var x: Int = 0
+    var y: Int = 0
+    var kind: CursorKind = .arrow
+    /// False when the cursor is hidden - a full-screen video, say.
+    var visible: Bool = false
+    /// True when the focused control on the PC accepts typing. This is what
+    /// lets the keyboard come up at the moment a text box is clicked instead
+    /// of having to be asked for.
+    var acceptsTyping: Bool = false
+    /// False until the first packet, so nothing is drawn on a guess.
+    var seen: Bool = false
+}
+
+/// Must match remote.CURSOR_KINDS, in order.
+enum CursorKind: UInt8 {
+    case arrow = 0, ibeam = 1, wait = 2, cross = 3, hand = 4
+    case size = 5, no = 6, busy = 7, help = 8
 }
 
 enum MouseButton: UInt8 {
@@ -115,6 +151,10 @@ final class Link: ObservableObject {
 
     /// The most recent screen frame, as JPEG. Published so SwiftUI redraws.
     @Published private(set) var frame: Data?
+
+    /// Where the PC's mouse is. Updated up to thirty times a second while a
+    /// screen is being watched, and left alone the rest of the time.
+    @Published private(set) var cursor = CursorState()
 
     private var conn: NWConnection?
     private var host: String = ""
@@ -400,6 +440,26 @@ final class Link: ObservableObject {
         if first == OutTag.screen.rawValue {   // [1][w:2][h:2][jpeg]
             guard data.count > 5 else { return }
             frame = data.subdata(in: 5..<data.count)
+            return
+        }
+        if first == OutTag.cursor.rawValue {   // [3][x:i32][y:i32][kind][flags]
+            guard data.count >= 11 else { return }
+            // Little-endian, and read byte by byte rather than through
+            // withUnsafeBytes(load:) - a Data slice carries no alignment
+            // guarantee, and an unaligned load of an Int32 is undefined
+            // behaviour rather than merely slow.
+            func i32(_ at: Int) -> Int32 {
+                let b = data[data.startIndex + at ..< data.startIndex + at + 4]
+                return b.reversed().reduce(Int32(0)) { ($0 << 8) | Int32($1) }
+            }
+            let flags = data[data.startIndex + 10]
+            cursor = CursorState(
+                x: Int(i32(1)),
+                y: Int(i32(5)),
+                kind: CursorKind(rawValue: data[data.startIndex + 9]) ?? .arrow,
+                visible: flags & 0x01 != 0,
+                acceptsTyping: flags & 0x02 != 0,
+                seen: true)
             return
         }
         // OutTag.audio never reaches here - receive() intercepts it on the

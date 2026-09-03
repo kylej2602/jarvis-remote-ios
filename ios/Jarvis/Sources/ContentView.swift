@@ -43,6 +43,11 @@ enum Palette {
     static let dim   = Color(red: 0.36,  green: 0.50,  blue: 0.62)
     static let hot   = Color(red: 0.21,  green: 0.82,  blue: 1.0)
     static let line  = Color(red: 0.05,  green: 0.16,  blue: 0.27)
+    // Amber for a right click and for "the PC is busy"; red for "you cannot
+    // drop that here". Both are only ever used by the pointer overlay, which
+    // has to say what a Windows cursor is saying without the words.
+    static let warm  = Color(red: 1.0,   green: 0.71,  blue: 0.28)
+    static let bad   = Color(red: 1.0,   green: 0.36,  blue: 0.43)
 }
 
 @MainActor
