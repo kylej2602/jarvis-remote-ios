@@ -37,6 +37,32 @@ struct SetupView: View {
             VStack(spacing: 26) {
                 header
 
+                // Said out loud, because it is the difference between "this app
+                // has forgotten my PC" and "this app is still looking for it".
+                // The link goes on cycling every address it knows while this
+                // page is up, so a phone that simply arrived home a second too
+                // early lands on the tabs by itself.
+                if model.retryingBehind, let known = model.pc {
+                    VStack(spacing: 6) {
+                        Text("still trying to reach \(known.name.uppercased())")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Palette.hot)
+                        Text("It will come back on its own the moment it "
+                             + "answers. Pick it below to use a different "
+                             + "address.")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Palette.dim)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity)
+                    .background(Palette.panel)
+                    .overlay(RoundedRectangle(cornerRadius: 10)
+                        .stroke(Palette.line, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 22)
+                }
+
                 if let target {
                     pairing(for: target)
                 } else {
@@ -50,12 +76,34 @@ struct SetupView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
                 }
+
+                if target == nil && model.canDismissSetup {
+                    VStack(spacing: 14) {
+                        Button("back") { model.dismissSetup() }
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Palette.hot)
+                        Button("forget this PC") { model.forget() }
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Palette.dim)
+                    }
+                    .padding(.top, 6)
+                }
             }
             .padding(.vertical, 40)
             .frame(maxWidth: .infinity)
         }
         .background(Palette.bg.ignoresSafeArea())
-        .onAppear { discovery.search() }
+        .onAppear {
+            discovery.search()
+            // Pre-filled with the name that works from anywhere rather than
+            // left blank. On a strange network the sweep below finds nothing,
+            // and the one thing that would have worked - typing `jarvis` - is
+            // the thing nobody thinks to try. Having it already in the box
+            // turns the away-from-home case into one tap on CONNECT.
+            if manualHost.isEmpty {
+                manualHost = Discovery.everywhereNames.first ?? "jarvis"
+            }
+        }
     }
 
     private var header: some View {

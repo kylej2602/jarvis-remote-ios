@@ -230,6 +230,23 @@ final class Link: ObservableObject {
         Defaults.saveAddresses(candidates, port: port)
     }
 
+    /// Try again right now, from the first address, without waiting out the
+    /// backoff.
+    ///
+    /// For coming back from the lock screen. A phone that has been asleep in a
+    /// pocket on the way home wakes up with the backoff already at its ceiling
+    /// and the candidate cursor parked on whichever address failed last, so the
+    /// first thing it does on the new network is wait five seconds and then try
+    /// the wrong address. This costs one connect attempt and removes that.
+    func nudge() {
+        guard wantOpen, !connected else { return }
+        backoff = 0.4
+        candidateIndex = 0
+        conn?.cancel()
+        conn = nil
+        open()
+    }
+
     func disconnect() {
         wantOpen = false
         pingTimer?.invalidate()

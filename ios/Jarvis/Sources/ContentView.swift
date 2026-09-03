@@ -50,6 +50,28 @@ enum Palette {
     static let bad   = Color(red: 1.0,   green: 0.36,  blue: 0.43)
 }
 
+/// Which of the three screens the app is showing.
+///
+/// This replaced a single `connectedOnce` flag, and the flag is the whole of
+/// "the app doesn't open the connection page when you restart it". It was a
+/// one-way latch, and it was set by `restore()` the instant a key was found in
+/// the Keychain - before one byte had been sent, let alone answered. So on a
+/// restart anywhere other than home the app went straight to the four tabs,
+/// the socket quietly failed over between addresses that were all unreachable,
+/// and there was no route back to the only page that could have fixed it. The
+/// connection page was not hidden by a bug; it was unreachable by design.
+///
+/// Now the restore has to actually succeed. `.connecting` is what a restored
+/// pairing looks like while it is being proved, and if it is not proved within
+/// a few seconds the connection page comes up on its own - with the link still
+/// retrying underneath it, so walking back into Wi-Fi range flips it to `.live`
+/// without anything being pressed.
+enum Stage: Equatable {
+    case setup          // the connection page
+    case connecting     // a remembered PC, being proved
+    case live           // answered; the tabs
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     // NOT @Published, and it is handed to the view tree as its own environment
@@ -59,7 +81,21 @@ final class AppModel: ObservableObject {
     let link = Link()
     @Published var pc: FoundPC?
     @Published var token: String = ""
-    @Published var connectedOnce = false
+    @Published private(set) var stage: Stage = .setup
+    /// Seconds the current `.connecting` attempt has been running, so the
+    /// waiting screen can count rather than spin at nothing.
+    @Published private(set) var waited = 0
+    /// True when the connection page is up but the link is still retrying a
+    /// remembered PC behind it. Purely so the page can say so.
+    @Published private(set) var retryingBehind = false
+
+    /// How long a remembered PC gets to answer before the connection page
+    /// comes up by itself. Link tries each known address with a four-second
+    /// deadline of its own, so this is comfortably more than one full sweep of
+    /// a home address and a tailnet address, and short enough that it is not a
+    /// wait anybody would sit through wondering if the app had hung.
+    private static let proveWithin = 9
+    private var clock: Timer?
 
     func connect(to pc: FoundPC, token: String) {
         self.pc = pc
@@ -89,11 +125,17 @@ final class AppModel: ObservableObject {
         Defaults.saveAddresses([pc.address] + alts, port: pc.port)
         link.connect(host: pc.address, port: pc.port, token: token,
                      alternates: alts)
-        connectedOnce = true
+        beginProving()
     }
 
     /// Reconnect to whatever was used last, if its key is still in the Keychain.
+    ///
+    /// Returning true no longer means "connected" - it means "there is
+    /// something to try". Whether it works is decided by `linkChanged`, which
+    /// is the only thing that can honestly say so.
+    @discardableResult
     func restore() -> Bool {
+        guard stage == .setup, pc == nil else { return false }
         let d = UserDefaults.standard
         guard let host = d.string(forKey: "lastHost") else { return false }
         let port = UInt16(d.integer(forKey: "lastPort"))
@@ -105,11 +147,90 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Start the clock that decides whether a remembered PC is really there.
+    private func beginProving() {
+        waited = 0
+        retryingBehind = false
+        // Already up - reconnecting to the PC that is already answering, which
+        // is what picking the same machine off the finder does. There is no
+        // false-to-true transition coming, so waiting for one would sit on the
+        // proving screen for nine seconds and then show the connection page
+        // for a connection that never went away.
+        if link.connected { stage = .live; return }
+        if stage != .live { stage = .connecting }
+        clock?.invalidate()
+        clock = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
+            [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+    }
+
+    private func tick() {
+        guard stage == .connecting else { return }
+        // Polled as well as observed. onChange is the fast path; this is the
+        // one that cannot be missed, and the cost of being sure is one boolean
+        // read a second for at most nine seconds.
+        if link.connected { linkChanged(connected: true); return }
+        waited += 1
+        guard waited >= Self.proveWithin else { return }
+        // Out of patience. The connection page comes up - but the link is NOT
+        // stopped. It goes on cycling the addresses it knows underneath, so a
+        // phone that is merely early (a VPN still coming up, a lock screen that
+        // has not brought the radio back) lands on the tabs by itself a moment
+        // later without anything being pressed.
+        stage = .setup
+        retryingBehind = true
+        clock?.invalidate()
+        clock = nil
+    }
+
+    /// Called from RootView whenever the socket's state changes. The one place
+    /// allowed to say the app is live, because it is the only one that knows.
+    func linkChanged(connected: Bool) {
+        if connected {
+            clock?.invalidate()
+            clock = nil
+            waited = 0
+            retryingBehind = false
+            stage = .live
+        }
+        // A drop does NOT throw the tabs away. Link reconnects for ever on its
+        // own, the status dot goes red and says so, and being kicked back to a
+        // connection page every time a phone locks would be far worse than the
+        // problem this fixes. The way back is the button on the status bar.
+    }
+
+    /// Show the connection page on purpose, from the status bar.
+    func openSetup() {
+        stage = .setup
+        retryingBehind = link.connected == false && pc != nil
+        clock?.invalidate()
+        clock = nil
+    }
+
+    /// Leave the connection page without changing anything, if there is
+    /// somewhere to go back to.
+    func dismissSetup() {
+        guard pc != nil else { return }
+        stage = link.connected ? .live : .connecting
+        if stage == .connecting { beginProving() }
+    }
+
+    /// True when there is a paired PC to go back to from the connection page.
+    var canDismissSetup: Bool { pc != nil }
+
     func forget() {
         if let pc { Vault.forget(pc.id) }
         link.disconnect()
+        clock?.invalidate()
+        clock = nil
         pc = nil
-        connectedOnce = false
+        token = ""
+        waited = 0
+        retryingBehind = false
+        stage = .setup
+        UserDefaults.standard.removeObject(forKey: "lastHost")
+        UserDefaults.standard.removeObject(forKey: "lastName")
     }
 
     /// The real HUD, at whichever address the socket is CURRENTLY using.
@@ -134,11 +255,23 @@ final class AppModel: ObservableObject {
 
 struct RootView: View {
     @EnvironmentObject var model: AppModel
+    // Observed so that `link.connected` changing drives the stage. AppModel
+    // cannot watch Link itself - a nested ObservableObject is not observed
+    // transitively - and this view already has both, so the handover happens
+    // here rather than through a Combine subscription that would have to be
+    // torn down somewhere.
+    @EnvironmentObject var link: Link
+    @Environment(\.scenePhase) private var phase
     @State private var tab = 0
 
     var body: some View {
         Group {
-            if model.connectedOnce {
+            switch model.stage {
+            case .setup:
+                SetupView()
+            case .connecting:
+                ConnectingView()
+            case .live:
                 TabView(selection: $tab) {
                     ControlTab().tabItem { Label("Control", systemImage: "rectangle.and.hand.point.up.left") }.tag(0)
                     // REMOTE, not "Screen". The old tab was a picture of one
@@ -150,12 +283,61 @@ struct RootView: View {
                     HUDTab().tabItem { Label("HUD", systemImage: "circle.hexagongrid") }.tag(2)
                     TalkTab().tabItem { Label("Talk", systemImage: "waveform") }.tag(3)
                 }
-            } else {
-                SetupView()
             }
         }
         .background(Palette.bg.ignoresSafeArea())
-        .onAppear { _ = model.restore() }
+        .onAppear { model.restore() }
+        .onChange(of: link.connected) { _, up in model.linkChanged(connected: up) }
+        // A phone that was asleep in a bag on the way home comes back on a
+        // different network with the backoff already at its ceiling. Restore
+        // covers the case where nothing was ever loaded; the nudge covers the
+        // far commoner one, where a paired PC is simply being waited for at the
+        // wrong address on a five-second timer.
+        .onChange(of: phase) { _, now in
+            guard now == .active else { return }
+            if model.pc == nil { model.restore() } else { link.nudge() }
+        }
+    }
+}
+
+// MARK: - proving a remembered PC
+
+/// What a restored pairing looks like while it is being checked.
+///
+/// It exists so that "I remember a key for this PC" and "this PC is there" are
+/// two different things on screen. It is deliberately not a blocking wait: the
+/// button below goes straight to the connection page, and if nothing answers
+/// within a few seconds the page comes up on its own anyway.
+struct ConnectingView: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var link: Link
+
+    var body: some View {
+        VStack(spacing: 22) {
+            Spacer()
+            Text("J.A.R.V.I.S.")
+                .font(.system(size: 17, weight: .semibold, design: .monospaced))
+                .kerning(6)
+                .foregroundStyle(Palette.ink)
+            ProgressView().tint(Palette.hot)
+            VStack(spacing: 6) {
+                Text("reaching \(model.pc?.name.uppercased() ?? "your PC")")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Palette.dim)
+                Text(link.lastError ?? "\(model.waited)s")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Palette.dim)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+            }
+            Spacer()
+            Button("connect to a different PC") { model.openSetup() }
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Palette.hot)
+                .padding(.bottom, 40)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.bg.ignoresSafeArea())
     }
 }
 
@@ -183,6 +365,20 @@ struct StatusBar: View {
                 .font(.system(size: 11, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(Palette.dim)
+            // THE WAY BACK TO THE CONNECTION PAGE, on every tab, always.
+            //
+            // Not only when something has gone wrong, because the moment it is
+            // needed is exactly the moment the app cannot tell that it is: a
+            // phone on a network where the PC has a different address looks
+            // identical to a PC that is switched off. One tap, from anywhere,
+            // and the finder and the type-an-address box are back.
+            Button { model.openSetup() } label: {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(link.connected ? Palette.dim : Palette.hot)
+                    .padding(.leading, 4)
+            }
+            .accessibilityLabel("connection settings")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
