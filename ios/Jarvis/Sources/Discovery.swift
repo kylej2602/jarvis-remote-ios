@@ -101,7 +101,19 @@ final class Discovery: ObservableObject {
     /// network or on 5G. Being a NAME rather than an address is the point:
     /// nothing personal is hard-coded into a public repository, and it keeps
     /// working if the 100.x address is ever reassigned.
-    static let everywhereNames = ["jarvis"]
+    ///
+    /// `jarvis.local` is there for the case the bare name does NOT cover.
+    /// The short name resolves through MagicDNS, which only publishes it while
+    /// Tailscale is actually connected on this phone - so with Tailscale
+    /// switched off, at home, on the very network the PC is sitting on, the
+    /// name that "works anywhere" resolves to nothing. `.local` is mDNS, is
+    /// answered by Windows itself, needs no VPN and no subnet sweep, and gets
+    /// the phone onto the PC in one hop whenever they share a network.
+    static let everywhereNames = ["jarvis", "jarvis.local"]
+
+    /// Every address this PC has ever been seen at, newest first, for the
+    /// setup screen to offer as one tap each. See SetupView.known.
+    static var remembered: [String] { Defaults.addresses }
 
     func search() {
         task?.cancel()
@@ -180,6 +192,25 @@ final class Discovery: ObservableObject {
     /// name - which is exactly the address you want written into the Keychain
     /// and reconnected to on a train. The rest become alternates.
     private func merge(_ pc: FoundPC) {
+        // SAVED THE MOMENT IT IS SEEN, not when it is connected to.
+        //
+        // These are the addresses that make the app work away from home, and
+        // they used to be written only by AppModel.connect - so a phone that
+        // had found the PC but never finished pairing, or that was reinstalled,
+        // had nothing to fall back on and nothing to offer on the setup page.
+        // One successful look on the home network now arms every away-from-home
+        // address permanently.
+        var all = Defaults.addresses
+        for a in [pc.address] + pc.alternates
+        where !a.isEmpty && !all.contains(a) {
+            if a.contains(".ts.net") || a.hasPrefix("100.") {
+                all.insert(a, at: 0)        // the ones that work in both places
+            } else {
+                all.append(a)
+            }
+        }
+        Defaults.saveAddresses(all, port: pc.port)
+
         guard let i = found.firstIndex(where: { $0.name == pc.name }) else {
             found.append(pc)
             return

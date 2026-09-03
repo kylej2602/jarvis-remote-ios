@@ -100,8 +100,17 @@ struct SetupView: View {
             // and the one thing that would have worked - typing `jarvis` - is
             // the thing nobody thinks to try. Having it already in the box
             // turns the away-from-home case into one tap on CONNECT.
+            //
+            // A REMEMBERED ADDRESS FIRST, and the short name only if there is
+            // none. Pre-filling `jarvis` was meant to save typing and instead
+            // pre-filled the one value that fails with Tailscale off, so the
+            // fastest thing on the page pointed at the commonest failure.
             if manualHost.isEmpty {
-                manualHost = Discovery.everywhereNames.first ?? "jarvis"
+                manualHost = known.first(where: {
+                        $0.hasPrefix("100.") || $0.contains(".ts.net") })
+                    ?? known.first
+                    ?? Discovery.everywhereNames.first
+                    ?? "jarvis"
             }
         }
     }
@@ -161,6 +170,49 @@ struct SetupView: View {
                     .foregroundStyle(Palette.dim)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 28)
+            }
+
+            // EVERY ADDRESS THIS PC HAS EVER ANSWERED ON, one tap each.
+            //
+            // This is the way out of the failure in the screenshot of the 3rd:
+            // the finder was still sweeping, `jarvis` had been typed by hand,
+            // and it came back "Nothing answered at jarvis:8765" - because the
+            // short name only resolves while Tailscale is connected on the
+            // phone, and it was not. The PC reports its tailnet name, its 100.x
+            // address and its LAN address on every /api/hello and they are all
+            // saved; there was simply nowhere in the interface that showed
+            // them. Now there is, so "it cannot find my PC" is always one tap
+            // from "try this address instead" rather than a dead end.
+            if !known.isEmpty {
+                VStack(spacing: 8) {
+                    Text("addresses this PC has answered on")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Palette.dim)
+                    ForEach(known, id: \.self) { addr in
+                        Button { manualHost = addr; manual() } label: {
+                            HStack {
+                                Text(addr)
+                                    .font(.system(size: 12.5,
+                                                  design: .monospaced))
+                                    .foregroundStyle(Palette.ink)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Text(Self.kind(of: addr))
+                                    .font(.system(size: 10,
+                                                  design: .monospaced))
+                                    .foregroundStyle(Palette.dim)
+                            }
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 11)
+                            .background(Palette.panel)
+                            .overlay(RoundedRectangle(cornerRadius: 9)
+                                .stroke(Palette.line, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                        }
+                    }
+                }
+                .padding(.horizontal, 22)
             }
 
             Button("search again") { discovery.search() }
@@ -262,7 +314,7 @@ struct SetupView: View {
                                alternates: h.addresses.filter { $0 != host }))
             } else {
                 busy = false
-                message = "Nothing answered at \(host):\(port)."
+                message = Self.whyNot(host: host, port: port)
             }
         }
     }
@@ -282,6 +334,54 @@ struct SetupView: View {
                 message = error.localizedDescription
             }
         }
+    }
+
+    /// The addresses worth offering, tailnet first because those are the ones
+    /// that work in both places. De-duplicated, and the bare short name is left
+    /// out - it is already in the box above and it is the one that fails.
+    private var known: [String] {
+        var out: [String] = []
+        for a in Discovery.remembered
+        where !a.isEmpty && !out.contains(a)
+            && !Discovery.everywhereNames.contains(a) {
+            out.append(a)
+        }
+        return Array(out.prefix(4))
+    }
+
+    private static func kind(of address: String) -> String {
+        if address.hasPrefix("100.") || address.contains(".ts.net") {
+            return "anywhere"
+        }
+        if address.hasSuffix(".local") { return "same network" }
+        if address.contains(".") && Int(address.split(separator: ".").first
+            .map(String.init) ?? "x") != nil { return "home" }
+        return "name"
+    }
+
+    /// Say WHY, not just that it failed.
+    ///
+    /// "Nothing answered at jarvis:8765" is true and useless: it is the same
+    /// sentence whether the PC is off, whether Jarvis is not running, or -
+    /// which is what it actually was - whether this phone's Tailscale is
+    /// switched off, because the short name is published by MagicDNS and
+    /// MagicDNS is part of Tailscale. Naming the likely cause is the whole
+    /// difference between a dead end and a thing to go and do.
+    private static func whyNot(host: String, port: UInt16) -> String {
+        let bare = !host.contains(".") && Int(host) == nil
+        if bare || host.contains(".ts.net") || host.hasPrefix("100.") {
+            return "Nothing answered at \(host):\(port).\n\n"
+                + "That name is published by Tailscale, so it only resolves "
+                + "while Tailscale is switched ON on this phone. Check it in "
+                + "Settings, or use one of the addresses above."
+        }
+        if host.hasSuffix(".local") {
+            return "Nothing answered at \(host):\(port).\n\n"
+                + "That name only works when the phone and the PC are on the "
+                + "same network."
+        }
+        return "Nothing answered at \(host):\(port).\n\n"
+            + "Check Jarvis is running on the PC."
     }
 
     private func field(_ placeholder: String,
